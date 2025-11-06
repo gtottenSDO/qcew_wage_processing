@@ -218,8 +218,8 @@ qcew_data <- tbl(con, Id(schema = "econ", table = "qcew_lmi")) |>
       levels = c("Low", "Mid", "High", "Average"),
       ordered = TRUE
     ),
-    sum_jobs = sdo_jobs[ind_code == "00"],
-    pct_jobs = sdo_jobs / na_if(sum_jobs, 0),
+    # sum_jobs = sum(sdo_jobs, na.rm = TRUE),
+    # pct_jobs = sdo_jobs / na_if(sum_jobs, 0),
     leg_color = case_when(
       category == "Low" ~ "#85BFFF",
       category == "Mid" ~ "#0073F2",
@@ -269,8 +269,15 @@ wage_boundaries <- qcew_data |>
       category,
       leg_color,
       label,
-      sum_jobs,
+      # sum_jobs,
       total_wage
+    )
+  ) |>
+  mutate(
+    sum_jobs = sum(cat_jobs, na.rm = TRUE),
+    .by = c(
+      area_code,
+      population_year
     )
   ) |>
   mutate(
@@ -283,6 +290,16 @@ wage_boundaries <- qcew_data |>
     )
   ) |>
   arrange(population_year, area_code, category)
+
+sdo_db_write_table(
+  wage_boundaries,
+  schema = "econ",
+  table = "wage_boundaries",
+  vintage = "v2024",
+  version = "v1",
+  overwrite = TRUE,
+  latest = TRUE
+)
 
 
 ```
@@ -342,26 +359,40 @@ The following tables need to be updated in postgres, each containing the followi
     -   category
 
 ```{r}
-average_wage <- wage_table %>%
-  select(
-    area_code = county_fips,
-    population_year = year,
-    sector_id = gcode,
-    avg_wage = avg_annual_wages,
-    category = category,
-    wage_source
-  ) %>%
+average_wage <- qcew_data %>%
   mutate(
-    wage_source = ifelse(area_code == "000", "state", wage_source),
+    wage_source = case_when(
+      !is.na(avg_wk_wage) ~ "county",
+      !is.na(region_avg_emp) ~ "region",
+      TRUE ~ "state"
+    ),
     wage_source_override = ifelse(
       wage_source == "county" | area_code == "000",
       FALSE,
       TRUE
     )
   ) %>%
+  select(
+    area_code = county_fips,
+    population_year = year,
+    sector_id = ind_code,
+    avg_wage,
+    category = category,
+    wage_source,
+    wage_source_override
+  ) |>
   arrange(area_code, population_year, sector_id)
 
-write_csv(average_wage, "_output/average_wage_2023.csv")
+sdo_db_write_table(
+  average_wage,
+  schema = "econ",
+  table = "average_wage",
+  vintage = "v2024",
+  version = "v1",
+  overwrite = TRUE,
+  latest = TRUE
+)
+
 ```
 
 -   wage_boundaries
