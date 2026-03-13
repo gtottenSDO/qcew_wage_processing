@@ -52,7 +52,7 @@ library(dbplyr)
 #
 # connect to postgres database
 # Create Connection to Postgres Database
-con <- connect_to_sdo_db("gtotten", password =Sys.getenv("sdo_db_pw"))
+con <- connect_to_sdo_db()
 
 #
 #

@@ -109,9 +109,7 @@ county_year_template <- expand_grid(county_fips = cty_list, year = year_list)
 
 naics_sectors <- pull_db_table(
   "xwalk",
-  "naics_long",
-  user = Sys.getenv("SDO_DB_DEFAULT_USER"),
-  password = Sys.getenv("SDO_DB_PW")
+  "naics_long"
 ) |>
   filter(lvl %in% c(0, 2)) |>
   pull(naics)
@@ -182,7 +180,8 @@ qcew_data <- tbl(duck_con, "lmi_qcew") |>
       own_title,
       ind_title
     ),
-    avgannualwage = as.numeric(na_if(avgannualwage, "s:"))
+      # # replace "s;" flags in avg_emp:tax_wage with NA and convert to numeric
+    avgannualwage = as.numeric(na_if(avgannualwage, "s;"))
   ) |>
   left_join(
     geography_crosswalk |> collect(),
@@ -190,10 +189,6 @@ qcew_data <- tbl(duck_con, "lmi_qcew") |>
     relationship = "many-to-many" #okay because crosswalk has multiple instances of county for allocating to state and regions as well as own
   ) |>
   pivot_wider(names_from = area_type, values_from = area_id) |>
-  # # replace "s;" flags in avg_emp:tax_wage with NA and convert to numeric
-  # mutate(
-  #   across(avg_emp:tax_wage, ~ as.numeric(na_if(., "s;")))
-  # ) |>
   # add county and region total employment total wages and avg wages
   mutate(
     region_avg_emp = na_if(sum(avg_emp, na.rm = TRUE), 0),
@@ -205,7 +200,7 @@ qcew_data <- tbl(duck_con, "lmi_qcew") |>
   mutate(
     state_avg_emp = avg_emp[county_fips == "000"],
     state_tot_wage = tot_wage[county_fips == "000"],
-        state_avg_wage = weighted.mean(avgannualwage[county_fips == "000"], avg_emp[county_fips == "000"]),
+        state_avg_wage = weighted.mean(avgannualwage[county_fips == "000"], avg_emp[county_fips == "000"], na.rm = TRUE),
     .by = c(year, ind_code)
   ) |>
   mutate(
