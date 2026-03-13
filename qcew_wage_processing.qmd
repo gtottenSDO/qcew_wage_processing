@@ -73,7 +73,9 @@ Certain Crosswalks are used from the SDO Crosswalk database, stored on the J: d
 Additionally a crosswalk `region_levels` is created to determine the lowest level of aggregation for each region type in a later step.
 
 ```{r}
-geography_crosswalk <- pull_db_table(schema = "xwalk", table = "area_pm")
+geography_crosswalk <- pull_db_table(schema = "xwalk", table = "area_county")
+
+geography_crosswalk_pm <- pull_db_table(schema = "xwalk", table = "area_pm")
 
 
 jobs_by_sector <- pull_db_table(schema = "estimates", table = "jobs_by_sector") %>%
@@ -87,8 +89,7 @@ jobs_by_sector <- pull_db_table(schema = "estimates", table = "jobs_by_sector") 
   ) %>%
   filter(total != 0)
 
-# leifa <- leifa_long %>%
-#   filter(leifa_group == "Jobs")
+
 
 ```
 
@@ -141,9 +142,7 @@ The following code is used to download the data for all counties in the state, a
 sdo_emp <- pull_db_table(
   "econ",
   "jobs_estimates",
-  filter_model_id = TRUE,
-  user = Sys.getenv("SDO_DB_DEFAULT_USER"),
-  password = Sys.getenv("SDO_DB_PW")
+  filter_model_id = TRUE
 )
 
 ```
@@ -182,27 +181,57 @@ qcew_data <- tbl(duck_con, "lmi_qcew") |>
     ),
       # # replace "s;" flags in avg_emp:tax_wage with NA and convert to numeric
     avgannualwage = as.numeric(na_if(avgannualwage, "s;"))
-  ) |>
-  left_join(
-    geography_crosswalk |> collect(),
+  )
+  
+qcew_region <- qcew_data|>
+  inner_join( # inner because of QCEW data that is not in a county
+    geography_crosswalk_pm |> 
+    filter(area_type == "region") |>
+      collect(),
     by = join_by(county_fips),
     relationship = "many-to-many" #okay because crosswalk has multiple instances of county for allocating to state and regions as well as own
   ) |>
-  pivot_wider(names_from = area_type, values_from = area_id) |>
-  # add county and region total employment total wages and avg wages
-  mutate(
+  # calculate regional averages for each industry and year, excluding state totals (county_fips == "000") and regional totals (county_fips == "500")
+  summarize(
     region_avg_emp = na_if(sum(avg_emp, na.rm = TRUE), 0),
-    region_tot_wage = na_if(sum(tot_wage, na.rm = TRUE), 0),
-    region_avg_wage = weighted.mean(avgannualwage, avg_emp),
-    .by = c(year, ind_code, region)
-  ) |>
-  collect() |>
-  mutate(
-    state_avg_emp = avg_emp[county_fips == "000"],
-    state_tot_wage = tot_wage[county_fips == "000"],
-        state_avg_wage = weighted.mean(avgannualwage[county_fips == "000"], avg_emp[county_fips == "000"], na.rm = TRUE),
+    region_tot_wage = sum(tot_wage, na.rm = TRUE),
+    region_avg_wage = weighted.mean(avgannualwage, avg_emp, na.rm = TRUE),
+    .by = c(year, area_id, ind_code)
+  ) |> 
+    arrange(year, area_id, ind_code)
+  
+  qcew_state <- qcew_data |>
+    filter(county_fips == "000") |>
+    mutate(
+      state_avg_wage = weighted.mean(avgannualwage, avg_emp, na.rm = TRUE),
     .by = c(year, ind_code)
+    ) |> 
+  select(
+    year,
+    ind_code,
+    state_avg_emp = avg_emp,
+    state_tot_wage = tot_wage,
+    state_avg_wage
+  ) 
+  
+qcew_wages <- qcew_data |> 
+  left_join( # inner because of QCEW data that is not in a county
+    geography_crosswalk_pm |> 
+      filter(area_type == "region") |>
+      inner_join(
+        qcew_region, 
+        by = "area_id", 
+        relationship = "many-to-many"
+        ) |> 
+          rename(region = area_id), #okay because crosswalk has multiple instances of county for allocating to state and regions as well as own
+    by = join_by(year, county_fips, ind_code),
+    relationship = "one-to-one"
   ) |>
+    left_join(
+      qcew_state,
+      by = join_by(year, ind_code),
+      relationship = "many-to-one"
+    ) |>
   mutate(
     avg_emp_final = coalesce(avg_emp, region_avg_emp, state_avg_emp),
     tot_wage_final = coalesce(tot_wage, region_tot_wage, state_tot_wage),
