@@ -1,82 +1,82 @@
----
-title: "QCEW Wage Processing for High/Medium/Low Designation"
-format: docx
----
-
-# Purpose of Analysis
-
-The purpose of this file is to categorize SDO sectors into Low, Medium, and High Wage sectors based on relative wages reported in the QCEW for each county.
-
-## Wage Designation
-
-The basic designation is based on the following general rules:
-
--   Low Wage jobs are those with an average wage less than 80% of the average wage for all jobs in the county.
--   Medium Wage jobs are those with an average wage between 80% and 120% of the average wage for all jobs in the county.
--   High Wage jobs are those with an average wage greater than 120% of the average wage for all jobs in the county.
-
-Average wages for this purpose are as they are reported on an annual basis from the QCEW.
-
-## Data Sources
-
-### BLS QCEW
-
-For the purposes of this analysis BLS data for the QCEW is used, rather than the direct data available to SDO in order to avoid potential disclosure issues around wages.
-
-## General Process
-
-The general process for this analysis is as follows:
-
-1.  Download QCEW data for all counties in the state, as well as statewide totals.
-2.  Assign each 2 digits naics sector to an aggregated gcode sector based on data availability. If no data is available then a regional average, adjusted for average total wage, is assigned in its place.
-3.  Calculate the average wage for each county, and the average wage for each sector in each county.
-4.  Fill in missing sectors with the regional average, adjusted for average total wage.
-5.  Assign each sector to a wage designation based on the rules above.
-6.  Tag color coding for website usage.
-
-# Pre-run
-
-## Load Libraries
-
-```{r}
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
 library(tidyverse)
 library(scales)
 library(DBI)
 library(RPostgres)
 library(sdodemog)
 library(dbplyr)
-library(duckdb)
-```
-
-## Connect to Postgres
-
-``` {r}
+#
+#
+#
+#
+#
 # connect to postgres database
 # Create Connection to Postgres Database
-con <- connect_to_sdo_db(Sys.getenv("SDO_DB_DEFAULT_USER"), Sys.getenv("SDO_DB_PW"))
+con <- connect_to_sdo_db("gtotten", password =Sys.getenv("sdo_db_pw"))
 
-duck_con <- dbConnect(duckdb(), "lmi_db.duckdb")
-
-```
-
-## Load Necessary Crosswalks
-
-Certain Crosswalks are used from the SDO Crosswalk database, stored on the J: drive. Export the most recent versions of each of the following crosswalks and save them to the `crosswalks` folder in the current working directory.
-
--   `geography_xwalk.csv` provides county codes and a crosswalk to region.
--   `aggregated_gcode_n2_crosswalk.csv` provides a crosswalk from 2 digit NAICS to aggregated gcode. This uses the `gcode_n2_crosswalk` from the "J:\Crosswalks\crosswalk.mdb" database for private sector jobs. This is used because no aggregated gcode sector spans multiple 2 digit NAICS sectors for private sector jobs[^1]. Public sector jobs are manually appended based on ownership code[^2], using industry code 10 corresponding to Total all industries. Total covered jobs are also appended via ownership code 0, also using industry code 10.
-
-[^1]: Private sector jobs are classified under Ownership Code 5
-
-[^2]: Where 1 is Federal, 2 is State, and 3 is Local
-
-Additionally a crosswalk `region_levels` is created to determine the lowest level of aggregation for each region type in a later step.
-
-```{r}
-geography_crosswalk <- pull_db_table(schema = "xwalk", table = "area_pm")
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+geography_crosswalk <- tbl(con, Id(schema = "xwalk", table = "area_pm"))
 
 
-jobs_by_sector <- pull_db_table(schema = "estimates", table = "jobs_by_sector") %>%
+jobs_by_sector <- tbl(
+  con,
+  Id(schema = "estimates", table = "jobs_by_sector")
+) %>%
   mutate(area_code = str_pad(area_code, 3, pad = "0")) %>%
   select(
     fips_long = geonum,
@@ -90,13 +90,13 @@ jobs_by_sector <- pull_db_table(schema = "estimates", table = "jobs_by_sector") 
 # leifa <- leifa_long %>%
 #   filter(leifa_group == "Jobs")
 
-```
-
-## Create templates for output
-
-The following code creates templates for the output files, which are then filled in during the analysis. Templates are created using `expand_grid` function to create all possible combinations of the following: county by year, and county by gcode and year.
-
-```{r}
+#
+#
+#
+#
+#
+#
+#
 cty_list <- geography_crosswalk |>
   distinct(county_fips) |>
   pull() |>
@@ -107,12 +107,7 @@ year_list <- c(2001:2024)
 # create template for county by year
 county_year_template <- expand_grid(county_fips = cty_list, year = year_list)
 
-naics_sectors <- pull_db_table(
-  "xwalk",
-  "naics_long",
-  user = Sys.getenv("SDO_DB_DEFAULT_USER"),
-  password = Sys.getenv("SDO_DB_PW")
-) |>
+naics_sectors <- pull_db_table("xwalk", "naics_long") |>
   filter(lvl %in% c(0, 2)) |>
   pull(naics)
 
@@ -123,48 +118,26 @@ county_naics_year_template <- expand_grid(
   year = year_list
 )
 
-```
-
-# QCEW Data Processing
-
-The following steps are used to process the QCEW data for use in this analysis.
-
-## Download QCEW Data
-
-QCEW data is available for download from the BLS as a series of CSV files.
-
-The following code is used to download the data for all counties in the state, as well as the statewide totals[^3].
-
-[^3]: To save time this code saves the data to a .csv file to avoid rerunning the code if it exists, in which case it just loads from the .csv.
-
-```{r}
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
 # load from postgres
 
-sdo_emp <- pull_db_table(
-  "econ",
-  "jobs_estimates",
-  filter_model_id = TRUE,
-  user = Sys.getenv("SDO_DB_DEFAULT_USER"),
-  password = Sys.getenv("SDO_DB_PW")
-)
+sdo_emp <- pull_db_table("econ", "jobs_estimates", filter_model_id = TRUE)
 
-```
-
-```{r}
-qcew_data <- tbl(duck_con, "lmi_qcew") |>
-  collect() |> 
-  filter(periodtype == "01") |> 
-  rename(
-    ind_code = code, 
-    own_code = ownership,
-    own_title = ownershipdesc,
-    ind_title = industry,
-    avg_emp = avgemp,
-    tot_wage = totwage,
-    tax_wage = taxwage,
-    year = periodyear
-    ) |> 
-      mutate(county_fips = str_sub(area, -3)) |> 
+qcew_data <- tbl(con, Id(schema = "econ", table = "qcew_lmi")) |>
   filter(
     (ind_code %in% c("00", naics_sectors)) &
       ((own_code %in% c("00", "10", "20", "30") & ind_code == "00") |
@@ -181,37 +154,33 @@ qcew_data <- tbl(duck_con, "lmi_qcew") |>
       own_code %in% c("10", "20", "30"),
       own_title,
       ind_title
-    ),
-    avgannualwage = as.numeric(na_if(avgannualwage, "s:"))
+    )
   ) |>
   left_join(
-    geography_crosswalk |> collect(),
-    by = join_by(county_fips),
-    relationship = "many-to-many" #okay because crosswalk has multiple instances of county for allocating to state and regions as well as own
+    geography_crosswalk,
+    by = join_by(county_fips)
   ) |>
   pivot_wider(names_from = area_type, values_from = area_id) |>
-  # # replace "s;" flags in avg_emp:tax_wage with NA and convert to numeric
-  # mutate(
-  #   across(avg_emp:tax_wage, ~ as.numeric(na_if(., "s;")))
-  # ) |>
+  # replace "s;" flags in avg_emp:tax_wage with NA and convert to numeric
+  mutate(
+    across(avg_emp:tax_wage, ~ as.numeric(na_if(., "s;")))
+  ) |>
   # add county and region total employment total wages and avg wages
   mutate(
     region_avg_emp = na_if(sum(avg_emp, na.rm = TRUE), 0),
     region_tot_wage = na_if(sum(tot_wage, na.rm = TRUE), 0),
-    region_avg_wage = weighted.mean(avgannualwage, avg_emp),
     .by = c(year, ind_code, region)
   ) |>
   collect() |>
   mutate(
     state_avg_emp = avg_emp[county_fips == "000"],
     state_tot_wage = tot_wage[county_fips == "000"],
-        state_avg_wage = weighted.mean(avgannualwage[county_fips == "000"], avg_emp[county_fips == "000"]),
     .by = c(year, ind_code)
   ) |>
   mutate(
     avg_emp_final = coalesce(avg_emp, region_avg_emp, state_avg_emp),
     tot_wage_final = coalesce(tot_wage, region_tot_wage, state_tot_wage),
-    avg_wage = coalesce(avgannualwage, region_avg_wage, state_avg_wage),
+    avg_wage = tot_wage_final / na_if(avg_emp_final, 0)
   ) |>
   left_join(
     sdo_emp |>
@@ -265,26 +234,23 @@ qcew_data <- tbl(duck_con, "lmi_qcew") |>
     .by = c(county_fips, year)
   )
 
-
-  
-```
-
-``` {r}
-# # Upload to postgres
-# sdo_db_write_table(
-#   qcew_data,
-#   schema = "econ",
-#   table = "wage_category_data",
-#   vintage = "v2024",
-#   latest = TRUE
-# )
+# Upload to postgres
+sdo_db_write_table(
+  qcew_data,
+  schema = "econ",
+  table = "wage_category_data",
+  vintage = "v2024",
+  version = "v1",
+  overwrite = TRUE,
+  latest = TRUE
+)
 
 
- ```
-
-## Create Wage Table
-
-```{r}
+#
+#
+#
+#
+#
 wage_boundaries <- qcew_data |>
   filter(ind_code != "00") |>
   summarize(
@@ -313,13 +279,13 @@ wage_boundaries <- qcew_data |>
   arrange(population_year, area_code, category)
 
 
-```
-
-# Creating jobs by Sector
-
-Finally we create a categorized jobs by sector table by joining leifa_long to the categories from the wage table. This is used to create the jobs by sector table on the website.
-
-```{r}
+#
+#
+#
+#
+#
+#
+#
 jobs_by_sector <- qcew_data %>%
   left_join(
     wage_table %>%
@@ -356,20 +322,20 @@ jobs_by_sector <- qcew_data %>%
   )
 
 write_csv(jobs_by_sector, "_output/jobs_by_sector_cat_2023.csv")
-```
-
-# Saving the data
-
-The following tables need to be updated in postgres, each containing the following fields:
-
--   average_wage
-    -   area_code
-    -   population_year
-    -   sector_id
-    -   avg_wage
-    -   category
-
-```{r}
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
 average_wage <- wage_table %>%
   select(
     area_code = county_fips,
@@ -390,43 +356,43 @@ average_wage <- wage_table %>%
   arrange(area_code, population_year, sector_id)
 
 write_csv(average_wage, "_output/average_wage_2023.csv")
-```
-
--   wage_boundaries
-    -   area_code
-    -   population_year
-    -   category
-    -   cat_jobs
-    -   sum_jobs
-    -   pct_jobs
-    -   leg_color
-    -   min_wage
-    -   max_wage
-    -   total_wage
-    -   label
-
-Average wage is a subset of wage_boundaries includ
-
-```{r save_csv_files}  
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
 
 write_csv(
   wage_boundaries %>%
     filter(!(is.na(pct_jobs))),
   "_output/wage_boundaries_2023.csv"
 )
-```
-
-# Checks
-
-## Distribution check 2022
-
-As a quick check we look at the distributions of wage groups for each county, in order to check for both outliers, and in particular to make sure that an outlier is not being used for an override.
-
-For 2022 there are 52 counties where the designation is not the most frequent designation and that also had jobs. These are all within one category of the most frequent (i.e., no high to low and vice versa), and generally come from just a few gcodes.
-
-We should check those where the regional employment for the gcode is less than 2000 and potentially manually override these.
-
-```{r}
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
 wage_group_check <- wage_table %>%
   #exclude state and "500" (latter effectively a county)
   filter(wage_source != "county" & !(county_fips %in% c("000", "500"))) %>%
@@ -486,13 +452,13 @@ wage_group_check <- wage_table %>%
 print(wage_group_check %>% group_by(county_fips) %>% count(sort = TRUE))
 print(wage_group_check %>% group_by(gcode) %>% count(sort = TRUE)) %>%
   left_join(select(gcode_n2_crosswalk, gcode:gcode_label))
-```
-
-## Comparing to prior analysis
-
-Next this was compared against prior analyses to make sure that the wage groups were consistent. This was done by comparing the wage groups for each county and year to the prior analysis. The results are below.
-
-```{r}
+#
+#
+#
+#
+#
+#
+#
 suffixes <- c("_2023", "_2022")
 
 wage_boundaries_v22 <- vroom("_data/wage_boundaries_2022.csv")
@@ -521,11 +487,11 @@ wage_boundaries_comparison <- wage_boundaries %>%
 write_csv(wage_boundaries_comparison, "_data/wage_boundaries_comparison.csv")
 
 
-```
-
-Examining the categories with different numbers of jobs this generally comes from different categorizations of jobs into various job categories. Next then we look at the individual categories to compare categorizations and jobs.
-
-```{r}
+#
+#
+#
+#
+#
 jobs_by_sector_v22 <- vroom("_data/jobs_by_sector_cat_2022.csv") %>%
   mutate(
     category = factor(
@@ -574,6 +540,9 @@ jobs_by_sector_missing_wage <- jobs_by_sector %>%
   filter(is.na(Avg_wage) & sector_id %in% gcode_n2_crosswalk$gcode)
 
 write_csv(jobs_by_sector_comparison, "_data/jobs_by_sector_comparison.csv")
-```
-
-# 
+#
+#
+#
+#
+#
+#
