@@ -183,9 +183,9 @@ qcew_data <- tbl(duck_con, "lmi_qcew") |>
     avgannualwage = as.numeric(na_if(avgannualwage, "s;"))
   )
   
-qcew_region <- qcew_data|>
+qcew_region <- qcew_data |>
   inner_join( # inner because of QCEW data that is not in a county
-    geography_crosswalk_pm |> 
+    geography_crosswalk |> 
     filter(area_type == "region") |>
       collect(),
     by = join_by(county_fips),
@@ -198,7 +198,43 @@ qcew_region <- qcew_data|>
     region_avg_wage = weighted.mean(avgannualwage, avg_emp, na.rm = TRUE),
     .by = c(year, area_id, ind_code)
   ) |> 
-    arrange(year, area_id, ind_code)
+    arrange(year, area_id, ind_code) |> 
+    mutate(
+      region_avg_wage_all_industries = region_avg_wage[ind_code == "00"],
+      region_boundary_low = 0.8 * region_avg_wage_all_industries,
+      region_boundary_high = 1.2 * region_avg_wage_all_industries,
+      wage_cat = factor(
+        case_when(
+          is.na(region_avg_wage) ~ NA_character_,
+          region_avg_wage < region_boundary_low ~ "Low",
+          region_avg_wage > region_boundary_high ~ "High",
+          region_avg_wage == region_avg_wage_all_industries ~ "Average",
+          TRUE ~ "Mid"
+        ),
+        levels = c("Low", "Mid", "High", "Average"),
+        ordered = TRUE
+      ),
+      .by = c(year, area_id)
+    )
+
+avg_wage_postgres <- pull_db_table("econ", "average_wage_region")
+
+#compare to postgres data
+qcew_region_comparison <- qcew_region |>
+  left_join(
+    avg_wage_postgres,
+    by = c("year", "area_id" = "region", "ind_code"),
+    suffix = c("_new", "_old")
+  ) |> 
+    mutate(
+      avg_emp_diff = abs(region_avg_emp_new - region_avg_emp_old),
+      tot_wage_diff = abs(region_tot_wage_new - region_tot_wage_old),
+      avg_wage_diff = abs(region_avg_wage_new - region_avg_wage_old),
+      max_diff = pmax(avg_emp_diff, avg_wage_diff)
+    ) |> 
+      filter(ind_code != "99")
+
+  write_csv(qcew_region, "avg_wage_region.csv")
   
   qcew_state <- qcew_data |>
     filter(county_fips == "000") |>
